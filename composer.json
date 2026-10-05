@@ -2,7 +2,7 @@
     "name": "pushinbr/pam-native-webrtc",
     "description": "Native WebRTC peer connections, GPU video rendering and call audio routing for PAM Native.",
     "type": "pam-native-plugin",
-    "keywords": ["pam-native", "webrtc", "video-call", "voice-call", "android"],
+    "keywords": ["pam-native", "webrtc", "video-call", "voice-call", "android", "ios"],
     "license": "Apache-2.0",
     "require": {
         "php": "^8.5",

@@ -1,77 +1,152 @@
-import AVFoundation
 import Foundation
 import PamNative
 import UIKit
+import WebRTC
 
-/// iOS peer connections are not shipped in 0.1; calls fail with a typed message instead of crashing.
-public final class WebRtcModule: NativeModule, @unchecked Sendable {
-    public init() {}
-
-    public func invoke(method: String, payload: Data, completion: @escaping ModuleCompletion) {
-        completion(.failure, Data("pam-native-webrtc 0.1 supports Android only; iOS peer connections are planned.".utf8))
-    }
-}
-
-/// Call audio session on iOS through AVAudioSession (mode, speaker override, Bluetooth HFP).
-public final class CallAudioModule: NativeModule, @unchecked Sendable {
-    private var videoMode = false
-    private var speaker = false
-    private var bluetooth = true
-
+/// PAM module `webrtc`: peer connections addressed by session id.
+public final class WebRtcModule: NativeModule, ClosableNativeModule, @unchecked Sendable {
     public init() {}
 
     public func invoke(method: String, payload: Data, completion: @escaping ModuleCompletion) {
         do {
             let values = try WireMap.decode(payload)
-            let session = AVAudioSession.sharedInstance()
+            let id = try values.text("sessionId")
             switch method {
-            case "start":
-                if case let .integer(mode)? = values["mode"] { videoMode = mode == 2 }
-                speaker = videoMode
-                try configure(session)
-                try session.setActive(true)
-            case "stop":
-                try session.setActive(false, options: .notifyOthersOnDeactivation)
-            case "setSpeaker":
-                if case let .flag(enabled)? = values["enabled"] { speaker = enabled }
-                try session.overrideOutputAudioPort(speaker ? .speaker : .none)
-            case "setBluetooth":
-                if case let .flag(enabled)? = values["enabled"] { bluetooth = enabled }
-                try configure(session)
-            case "setRingback", "setRingtone", "setProximity", "setMicrophoneMute":
-                if method == "setProximity", case let .flag(enabled)? = values["enabled"] {
-                    DispatchQueue.main.async { UIDevice.current.isProximityMonitoringEnabled = enabled }
-                }
+            case "create":
+                _ = try WebRtcRuntime.create(RtcSessionConfig(
+                    id: id,
+                    iceServersJson: values.text("iceServersJson", "[]"),
+                    video: values.flag("video"),
+                    facing: Int(values.integer("facing", 1)),
+                    width: Int(min(max(values.integer("width", 1_280), 160), 3_840)),
+                    height: Int(min(max(values.integer("height", 720), 120), 2_160)),
+                    fps: Int(min(max(values.integer("fps", 30), 5), 60)),
+                    relayOnly: values.flag("relayOnly")
+                ))
+                succeed(completion)
             case "next":
-                return
+                guard let session = WebRtcRuntime.session(id) else { throw RtcError("RTC session \(id) not found") }
+                session.events.next(completion)
+            case "startLocal":
+                try WebRtcRuntime.sessionOrThrow(id).startLocal(completion)
+            case "createOffer":
+                try WebRtcRuntime.sessionOrThrow(id).createOffer(iceRestart: values.flag("iceRestart"), completion)
+            case "createAnswer":
+                try WebRtcRuntime.sessionOrThrow(id).createAnswer(completion)
+            case "setRemoteDescription":
+                try WebRtcRuntime.sessionOrThrow(id).setRemote(
+                    type: values.integer("type", 0),
+                    sdp: try values.text("sdp"),
+                    completion
+                )
+            case "addIceCandidate":
+                try WebRtcRuntime.sessionOrThrow(id).addCandidate(
+                    mid: values.text("sdpMid", ""),
+                    line: Int32(clamping: values.integer("sdpMLineIndex", 0)),
+                    candidate: try values.text("candidate")
+                ) { added in
+                    succeed(completion, ["added": .flag(added)])
+                }
+            case "setMicrophone":
+                try WebRtcRuntime.sessionOrThrow(id).setMicrophone(values.flag("enabled", true))
+                succeed(completion)
+            case "setCamera":
+                try WebRtcRuntime.sessionOrThrow(id).setCamera(values.flag("enabled", true), completion)
+            case "switchCamera":
+                try WebRtcRuntime.sessionOrThrow(id).switchCamera(completion)
+            case "stats":
+                try WebRtcRuntime.sessionOrThrow(id).stats(completion)
+            case "close":
+                WebRtcRuntime.close(id)
+                succeed(completion)
             default:
-                throw CallAudioError.unknownMethod
+                throw RtcError("Unknown WebRTC method \(method)")
             }
-            completion(.success, try WireMap.encode([:]))
         } catch {
-            completion(.failure, Data(String(describing: error).utf8))
+            fail(completion, error.localizedDescription)
         }
     }
 
-    private func configure(_ session: AVAudioSession) throws {
-        var options: AVAudioSession.CategoryOptions = [.allowBluetoothA2DP]
-        if bluetooth { options.insert(.allowBluetooth) }
-        if speaker { options.insert(.defaultToSpeaker) }
-        try session.setCategory(.playAndRecord, mode: videoMode ? .videoChat : .voiceChat, options: options)
+    public func close() {
+        WebRtcRuntime.closeAll()
     }
 }
 
-private enum CallAudioError: Error {
-    case unknownMethod
-}
-
+/// PAM view `webrtc.video`: renders a session's local or remote track with Metal.
 public final class RtcVideoViewFactory: NativeViewFactory, @unchecked Sendable {
+    static let fitCover: Int64 = 1
+    static let fitContain: Int64 = 2
+
     public init() {}
+
     public func create(context: AnyObject?, emit: @escaping (Data) -> Void) -> UIView {
-        let view = UIView()
-        view.backgroundColor = .black
-        return view
+        RtcVideoContainer(frame: .zero)
     }
-    public func update(view: UIView, properties: [String: WireValue]) {}
-    public func release(view: UIView) {}
+
+    public func update(view: UIView, properties: [String: WireValue]) {
+        guard let container = view as? RtcVideoContainer else { return }
+        container.configure(
+            fit: properties.integer("fit", Self.fitCover),
+            mirror: properties.flag("mirror")
+        )
+        container.attach(
+            sessionId: properties.text("sessionId", ""),
+            track: Int(properties.integer("track", Int64(WebRtcRuntime.trackRemote)))
+        )
+    }
+
+    public func release(view: UIView) {
+        (view as? RtcVideoContainer)?.dispose()
+    }
+}
+
+/// Black host around an RTCMTLVideoView so video composes with overlays.
+final class RtcVideoContainer: UIView {
+    let renderer = RTCMTLVideoView(frame: .zero)
+    private var unbind: (() -> Void)?
+    private var bound: RTCVideoTrack?
+    private var sessionId = ""
+    private var track = 0
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+        clipsToBounds = true
+        renderer.videoContentMode = .scaleAspectFill
+        renderer.frame = bounds
+        renderer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(renderer)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func configure(fit: Int64, mirror: Bool) {
+        renderer.videoContentMode = fit == RtcVideoViewFactory.fitContain ? .scaleAspectFit : .scaleAspectFill
+        renderer.transform = mirror ? CGAffineTransform(scaleX: -1, y: 1) : .identity
+    }
+
+    func attach(sessionId: String, track: Int) {
+        guard sessionId != self.sessionId || track != self.track else { return }
+        unbind?()
+        bind(nil)
+        self.sessionId = sessionId
+        self.track = track
+        unbind = sessionId.isEmpty ? nil : WebRtcRuntime.observe(sessionId, track: track) { [weak self] value in
+            self?.bind(value)
+        }
+    }
+
+    private func bind(_ track: RTCVideoTrack?) {
+        guard bound !== track else { return }
+        bound?.remove(renderer)
+        bound = track
+        track?.add(renderer)
+        renderer.isHidden = track == nil
+    }
+
+    func dispose() {
+        unbind?()
+        unbind = nil
+        bind(nil)
+    }
 }

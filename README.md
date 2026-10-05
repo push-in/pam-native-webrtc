@@ -15,8 +15,18 @@ Native WebRTC peer connections, GPU video rendering and call audio routing for
   focus and mode, speaker/earpiece, wired and Bluetooth (SCO / LE) routing,
   ringback, ringtone with vibration, microphone mute and the proximity wake lock.
 
-Android API 26+ (WebRTC M124). iOS: `CallAudio` maps to `AVAudioSession`;
-peer connections and video are not shipped for iOS in 0.1.
+Android API 26+ (WebRTC M124) and iOS 15+ (GoogleWebRTC M124 through the
+`stasel/WebRTC` Swift package): the same module contract, events and view on
+both platforms. iOS renders with `RTCMTLVideoView` (Metal), captures with
+`RTCCameraVideoCapturer`, and `CallAudio` drives `AVAudioSession`
+(`playAndRecord` + `voiceChat`/`videoChat`, Bluetooth HFP/wired/speaker
+routing with route events, proximity monitoring, a generated ringback tone,
+an alert-sound ringtone with vibration, microphone mute on every local track).
+iOS limitations: apps cannot play the user's system ringtone (use
+`pam-native-calls`/CallKit for incoming calls), and the plugin adds the
+`audio` background mode so calls keep running in the background. The iOS
+implementation has not been validated on a device yet; see
+`ios/Tests/WebRtcTests.swift` (XCTest mirror of the Android suite).
 
 ## Install
 

@@ -42,13 +42,27 @@
         "sourceDirs": [
             "ios/Sources"
         ],
+        "swiftPackages": [
+            {
+                "url": "https://github.com/stasel/WebRTC.git",
+                "requirement": {
+                    "kind": 2,
+                    "value": "124.0.0"
+                },
+                "products": [
+                    "WebRTC"
+                ]
+            }
+        ],
         "frameworks": [
-            "AVFoundation"
+            "AVFoundation",
+            "AudioToolbox"
         ],
         "usageDescriptions": {
             "NSCameraUsageDescription": "Share your camera during video calls.",
             "NSMicrophoneUsageDescription": "Talk during voice and video calls."
-        }
+        },
+        "infoPlist": "ios/Info.plist"
     },
     "idl": "pam-native.idl.json",
     "modules": [
