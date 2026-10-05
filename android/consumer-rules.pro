@@ -1,0 +1,4 @@
+-keep class org.webrtc.** { *; }
+-keep class dev.pam.webrtc.WebRtcModule { <init>(android.content.Context); }
+-keep class dev.pam.webrtc.CallAudioModule { <init>(android.content.Context); }
+-keep class dev.pam.webrtc.RtcVideoViewFactory { <init>(android.content.Context); }

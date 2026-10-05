@@ -1,0 +1,23 @@
+{
+    "$schema": "vendor/pushinbr/pam-native-plugin-kit/resources/pam-native.idl.schema.json",
+    "version": 1,
+    "namespace": "Pam.WebRtc",
+    "enums": {
+        "RtcEventKind": {"IceCandidate": 1, "ConnectionState": 2, "RemoteTrack": 3, "RenegotiationNeeded": 4, "LocalReady": 5, "Failure": 6},
+        "RtcConnectionState": {"New": 1, "Connecting": 2, "Connected": 3, "Disconnected": 4, "Failed": 5, "Closed": 6},
+        "SdpType": {"Offer": 1, "Answer": 2},
+        "TrackKind": {"Audio": 1, "Video": 2},
+        "RtcTrack": {"Local": 1, "Remote": 2},
+        "VideoFit": {"Cover": 1, "Contain": 2},
+        "CameraFacing": {"Front": 1, "Back": 2},
+        "CallAudioMode": {"Voice": 1, "Video": 2},
+        "CallAudioRoute": {"Earpiece": 1, "Speaker": 2, "WiredHeadset": 3, "Bluetooth": 4}
+    },
+    "records": {
+        "IceCandidate": {"candidate": "string", "sdpMid": "string", "sdpMLineIndex": "int"},
+        "SessionDescription": {"type": "SdpType", "sdp": "string"},
+        "RtcEvent": {"kind": "RtcEventKind", "candidate": "string?", "sdpMid": "string?", "sdpMLineIndex": "int?", "state": "RtcConnectionState?", "track": "TrackKind?", "message": "string?"},
+        "RtcStats": {"bytesSent": "int", "bytesReceived": "int", "packetsLost": "int", "roundTripTimeMs": "float", "jitterMs": "float", "inboundFramesPerSecond": "float", "availableOutgoingBitrate": "int", "relayed": "bool"},
+        "CallAudioRouteEvent": {"route": "CallAudioRoute"}
+    }
+}
