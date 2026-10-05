@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-10-05
+
+- iOS usage descriptions now match `pam-native-media`/`pam-native-camera`, so
+  apps installing these plugins together no longer fail the generated
+  Info.plist merge.
+
 ## 0.2.0 - 2026-10-05
 
 - iOS: native peer connections on GoogleWebRTC M124 (`stasel/WebRTC` Swift

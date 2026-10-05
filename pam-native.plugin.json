@@ -59,8 +59,8 @@
             "AudioToolbox"
         ],
         "usageDescriptions": {
-            "NSCameraUsageDescription": "Share your camera during video calls.",
-            "NSMicrophoneUsageDescription": "Talk during voice and video calls."
+            "NSCameraUsageDescription": "Capture photos and videos.",
+            "NSMicrophoneUsageDescription": "Record audio with videos."
         },
         "infoPlist": "ios/Info.plist"
     },
