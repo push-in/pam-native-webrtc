@@ -18,6 +18,7 @@ import org.webrtc.audio.JavaAudioDeviceModule
 object WebRtcRuntime {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val sessions = ConcurrentHashMap<String, RtcSession>()
+    private val medias = ConcurrentHashMap<String, RtcLocalMedia>()
     private val observers = ConcurrentHashMap<String, CopyOnWriteArraySet<(VideoTrack?) -> Unit>>()
 
     val egl: EglBase by lazy { EglBase.create() }
@@ -51,6 +52,8 @@ object WebRtcRuntime {
 
     internal fun create(context: Context, config: RtcSessionConfig): RtcSession {
         require(config.id.matches(SESSION_ID)) { "Invalid session id" }
+        require(!medias.containsKey(config.id)) { "Id ${config.id} belongs to a local media stream" }
+        require(config.localMediaId.isEmpty() || config.localMediaId.matches(SESSION_ID)) { "Invalid local media id" }
         sessions.remove(config.id)?.close()
         return RtcSession(context.applicationContext, config, factory(context)).also {
             sessions[config.id] = it
@@ -70,13 +73,36 @@ object WebRtcRuntime {
 
     fun closeAll() {
         sessions.keys.toList().forEach(::close)
+        medias.keys.toList().forEach(::closeMedia)
     }
 
-    /** Observes a session track; the callback runs on the main thread, immediately and on every change. */
+    internal fun createMedia(context: Context, config: RtcMediaConfig): RtcLocalMedia {
+        require(config.id.matches(SESSION_ID)) { "Invalid local media id" }
+        require(!sessions.containsKey(config.id)) { "Id ${config.id} belongs to a peer connection" }
+        medias.remove(config.id)?.close()
+        return RtcLocalMedia(context.applicationContext, config, factory(context)).also {
+            medias[config.id] = it
+        }
+    }
+
+    fun media(id: String): RtcLocalMedia? = medias[id]
+
+    internal fun mediaOrThrow(id: String): RtcLocalMedia =
+        medias[id] ?: throw IllegalStateException("Local media $id not found")
+
+    fun mediaIds(): Set<String> = medias.keys.toSet()
+
+    /** Closes a shared stream: attached peers stop sending it, then the capture is released. */
+    fun closeMedia(id: String) {
+        medias.remove(id)?.close()
+    }
+
+    /** Observes a session track (or a local media preview, by media id and [TRACK_LOCAL]); the callback runs on the main thread, immediately and on every change. */
     fun observe(sessionId: String, track: Int, observer: (VideoTrack?) -> Unit): AutoCloseable {
         val key = key(sessionId, track)
         observers.getOrPut(key) { CopyOnWriteArraySet() }.add(observer)
         val current = sessions[sessionId]?.videoTrack(track)
+            ?: medias[sessionId]?.takeIf { track == TRACK_LOCAL }?.videoTrack
         runOnMain { observer(current) }
         return AutoCloseable { observers[key]?.remove(observer) }
     }

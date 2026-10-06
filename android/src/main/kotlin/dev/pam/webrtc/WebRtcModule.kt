@@ -11,6 +11,7 @@ class WebRtcModule(private val context: Context) : NativeModule {
     override fun invoke(method: String, payload: ByteArray, completion: ModuleCompletion) {
         runCatching {
             val values = WireMap.decode(payload)
+            if (method.startsWith("media")) return media(method, values, completion)
             val id = values.text("sessionId")
             when (method) {
                 "create" -> {
@@ -25,6 +26,7 @@ class WebRtcModule(private val context: Context) : NativeModule {
                             height = values.integer("height", 720).toInt().coerceIn(120, 2160),
                             fps = values.integer("fps", 30).toInt().coerceIn(5, 60),
                             relayOnly = values.flag("relayOnly"),
+                            localMediaId = values.text("localMediaId", ""),
                         ),
                     )
                     completion.success()
@@ -64,5 +66,38 @@ class WebRtcModule(private val context: Context) : NativeModule {
                 else -> completion.failure("Unknown WebRTC method $method")
             }
         }.onFailure { completion.failure(it.message ?: "WebRTC operation failed") }
+    }
+
+    /** Shared local media streams (`LocalMedia` in PHP) addressed by media id. */
+    private fun media(method: String, values: Map<String, WireValue>, completion: ModuleCompletion) {
+        val id = values.text("mediaId")
+        when (method) {
+            "mediaCreate" -> {
+                WebRtcRuntime.createMedia(
+                    context,
+                    RtcMediaConfig(
+                        id = id,
+                        video = values.flag("video"),
+                        facing = values.integer("facing", 1).toInt(),
+                        width = values.integer("width", 1280).toInt().coerceIn(160, 3840),
+                        height = values.integer("height", 720).toInt().coerceIn(120, 2160),
+                        fps = values.integer("fps", 30).toInt().coerceIn(5, 60),
+                    ),
+                )
+                completion.success()
+            }
+            "mediaStart" -> WebRtcRuntime.mediaOrThrow(id).start(completion)
+            "mediaSetMicrophone" -> WebRtcRuntime.mediaOrThrow(id).let {
+                it.setMicrophone(values.flag("enabled", true))
+                completion.success(it.snapshot())
+            }
+            "mediaSetCamera" -> WebRtcRuntime.mediaOrThrow(id).setCamera(values.flag("enabled", true), completion)
+            "mediaSwitchCamera" -> WebRtcRuntime.mediaOrThrow(id).switchCamera(completion)
+            "mediaClose" -> {
+                WebRtcRuntime.closeMedia(id)
+                completion.success()
+            }
+            else -> completion.failure("Unknown WebRTC method $method")
+        }
     }
 }

@@ -18,6 +18,7 @@ import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
+import org.webrtc.RtpSender
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
@@ -34,6 +35,8 @@ internal data class RtcSessionConfig(
     val height: Int,
     val fps: Int,
     val relayOnly: Boolean,
+    /** Shared [RtcLocalMedia] feeding this peer; empty opens a capture for this session only. */
+    val localMediaId: String = "",
 )
 
 /** One native RTCPeerConnection with its local capture pipeline and event channel. */
@@ -52,6 +55,18 @@ class RtcSession internal constructor(
     private var localAudio: AudioTrack? = null
     private var capturing = false
     private var front = config.facing != FACING_BACK
+    @Volatile
+    private var sharedAudioSender: RtpSender? = null
+
+    @Volatile
+    private var sharedVideoSender: RtpSender? = null
+
+    /** Shared stream this peer sends, or null when it owns its capture (1:1 calls). */
+    @Volatile
+    var localMedia: RtcLocalMedia? = null
+        private set
+
+    val usesSharedMedia: Boolean get() = config.localMediaId.isNotEmpty()
 
     @Volatile
     var localVideo: VideoTrack? = null
@@ -84,11 +99,64 @@ class RtcSession internal constructor(
     fun videoTrack(track: Int): VideoTrack? =
         if (track == WebRtcRuntime.TRACK_LOCAL) localVideo else remoteVideo
 
-    fun hasLocalAudio(): Boolean = localAudio != null
+    fun hasLocalAudio(): Boolean = localAudio != null || sharedAudioSender != null
 
-    fun isCapturing(): Boolean = capturing
+    fun isCapturing(): Boolean = localMedia?.isCapturing() ?: capturing
 
-    internal fun startLocal(completion: ModuleCompletion) = execute(completion) {
+    /** Tracks this peer currently sends from its shared stream (audio, video). */
+    fun sharedSenderCount(): Int = listOfNotNull(sharedAudioSender, sharedVideoSender).size
+
+    internal fun startLocal(completion: ModuleCompletion) {
+        if (usesSharedMedia) return startShared(completion)
+        startOwn(completion)
+    }
+
+    private fun startShared(completion: ModuleCompletion) = execute(completion) {
+        val media = WebRtcRuntime.mediaOrThrow(config.localMediaId)
+        localMedia = media
+        media.attach(this)
+        media.ensureStarted()
+        attachSharedTracks(media)
+        emit(EVENT_LOCAL_READY)
+        completion.success()
+    }
+
+    /** Called by the shared stream when its tracks appear; idempotent. */
+    internal fun syncLocalMedia() {
+        val media = localMedia ?: return
+        runCatching { executor.execute { attachSharedTracks(media) } }
+    }
+
+    private fun attachSharedTracks(media: RtcLocalMedia) {
+        if (closed || localMedia !== media) return
+        val streams = listOf("stream-${media.id}")
+        val audio = media.audioTrack
+        if (audio != null && sharedAudioSender == null) sharedAudioSender = peer.addTrack(audio, streams)
+        val video = media.videoTrack
+        if (video != null && sharedVideoSender == null) {
+            sharedVideoSender = peer.addTrack(video, streams)
+            localVideo = video
+            WebRtcRuntime.publish(id, WebRtcRuntime.TRACK_LOCAL, video)
+        }
+    }
+
+    /** The shared stream is closing: stop sending its tracks (blocks until done). */
+    internal fun detachLocalMedia(media: RtcLocalMedia) {
+        if (localMedia !== media) return
+        WebRtcRuntime.publish(id, WebRtcRuntime.TRACK_LOCAL, null, wait = true)
+        val work = Runnable {
+            if (!closed) {
+                listOfNotNull(sharedAudioSender, sharedVideoSender).forEach { runCatching { peer.removeTrack(it) } }
+            }
+            sharedAudioSender = null
+            sharedVideoSender = null
+            localVideo = null
+            localMedia = null
+        }
+        runCatching { executor.submit(work).get(3, TimeUnit.SECONDS) }.onFailure { work.run() }
+    }
+
+    private fun startOwn(completion: ModuleCompletion) = execute(completion) {
         if (localAudio == null) {
             audioSource = factory.createAudioSource(MediaConstraints())
             localAudio = factory.createAudioTrack("audio-$id", audioSource).also {
@@ -145,10 +213,16 @@ class RtcSession internal constructor(
         !closed && peer.addIceCandidate(IceCandidate(mid, line, candidate))
 
     internal fun setMicrophone(enabled: Boolean) {
+        localMedia?.setMicrophone(enabled)
         localAudio?.setEnabled(enabled)
     }
 
-    internal fun setCamera(enabled: Boolean, completion: ModuleCompletion) = execute(completion) {
+    internal fun setCamera(enabled: Boolean, completion: ModuleCompletion) {
+        val media = localMedia ?: return setOwnCamera(enabled, completion)
+        media.setCamera(enabled, completion)
+    }
+
+    private fun setOwnCamera(enabled: Boolean, completion: ModuleCompletion) = execute(completion) {
         val camera = capturer
         if (camera != null && enabled != capturing) {
             if (enabled) camera.startCapture(config.width, config.height, config.fps) else camera.stopCapture()
@@ -159,6 +233,7 @@ class RtcSession internal constructor(
     }
 
     internal fun switchCamera(completion: ModuleCompletion) {
+        localMedia?.let { return it.switchCamera(completion) }
         val camera = capturer ?: return completion.failure("No camera is capturing")
         camera.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
             override fun onCameraSwitchDone(isFrontCamera: Boolean) {
@@ -220,6 +295,8 @@ class RtcSession internal constructor(
         if (closed) return
         closed = true
         events.close()
+        // A shared stream outlives its peers: only this peer's senders go away with it.
+        localMedia?.detach(this)
         // Detach renderers before tracks are disposed: removing a sink from a disposed track throws.
         WebRtcRuntime.publish(id, WebRtcRuntime.TRACK_LOCAL, null, wait = true)
         WebRtcRuntime.publish(id, WebRtcRuntime.TRACK_REMOTE, null, wait = true)
