@@ -26,17 +26,26 @@ final class RtcVideoView implements Renderable
     ) {
     }
 
-    public static function make(PeerConnection|string $session, RtcTrack $track = RtcTrack::Remote): self
+    public static function make(PeerConnection|LocalMedia|string $session, RtcTrack $track = RtcTrack::Remote): self
     {
-        $view = new self($session instanceof PeerConnection ? $session->id : $session, $track);
+        if ($session instanceof LocalMedia) {
+            $track = RtcTrack::Local;
+        }
+        $view = new self($session instanceof PeerConnection || $session instanceof LocalMedia ? $session->id : $session, $track);
         $view->mirror = $track === RtcTrack::Local;
 
         return $view;
     }
 
-    public static function local(PeerConnection|string $session): self
+    public static function local(PeerConnection|LocalMedia|string $session): self
     {
         return self::make($session, RtcTrack::Local);
+    }
+
+    /** The one local preview of a shared stream (mirrored; same track every peer sends). */
+    public static function preview(LocalMedia|string $media): self
+    {
+        return self::make($media, RtcTrack::Local);
     }
 
     public static function remote(PeerConnection|string $session): self
@@ -44,12 +53,15 @@ final class RtcVideoView implements Renderable
         return self::make($session, RtcTrack::Remote);
     }
 
-    /** Builds the view from template attributes (`<RtcVideoView session="..." track="local" fit="contain" />`). */
+    /**
+     * Builds the view from template attributes (`<RtcVideoView session="..." track="local" fit="contain" />`,
+     * or `<RtcVideoView :media="$localMedia" />` for a shared stream preview).
+     */
     public static function fromProps(array $props): self
     {
-        $session = $props['session'] ?? $props['sessionId'] ?? '';
-        $track = self::option($props['track'] ?? null, RtcTrack::class, RtcTrack::Remote);
-        $view = self::make($session instanceof PeerConnection ? $session : (string) $session, $track);
+        $session = $props['session'] ?? $props['sessionId'] ?? $props['media'] ?? '';
+        $track = self::option($props['track'] ?? null, RtcTrack::class, isset($props['media']) ? RtcTrack::Local : RtcTrack::Remote);
+        $view = self::make($session instanceof PeerConnection || $session instanceof LocalMedia ? $session : (string) $session, $track);
         $view = $view->fit(self::option($props['fit'] ?? null, VideoFit::class, VideoFit::Cover));
         if (array_key_exists('mirror', $props)) {
             $view = $view->mirror(filter_var($props['mirror'], FILTER_VALIDATE_BOOLEAN));

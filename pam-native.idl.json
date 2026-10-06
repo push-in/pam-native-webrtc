@@ -18,6 +18,7 @@
         "SessionDescription": {"type": "SdpType", "sdp": "string"},
         "RtcEvent": {"kind": "RtcEventKind", "candidate": "string?", "sdpMid": "string?", "sdpMLineIndex": "int?", "state": "RtcConnectionState?", "track": "TrackKind?", "message": "string?"},
         "RtcStats": {"bytesSent": "int", "bytesReceived": "int", "packetsLost": "int", "roundTripTimeMs": "float", "jitterMs": "float", "inboundFramesPerSecond": "float", "availableOutgoingBitrate": "int", "relayed": "bool"},
-        "CallAudioRouteEvent": {"route": "CallAudioRoute"}
+        "CallAudioRouteEvent": {"route": "CallAudioRoute"},
+        "LocalMediaState": {"facing": "CameraFacing", "microphone": "bool", "camera": "bool", "video": "bool", "peers": "int"}
     }
 }

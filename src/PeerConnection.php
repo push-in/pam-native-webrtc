@@ -34,6 +34,7 @@ final class PeerConnection
     private bool $opened = false;
     private bool $closed = false;
     private ?RtcConnectionState $state = null;
+    private ?LocalMedia $media = null;
 
     /** @var list<Closure(RtcEvent): void> */
     private array $listeners = [];
@@ -60,7 +61,7 @@ final class PeerConnection
         if (preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id) !== 1) {
             throw new InvalidArgumentException('Session ids may contain only letters, digits, "-" and "_".');
         }
-        if (isset(self::$sessions[$id])) {
+        if (isset(self::$sessions[$id]) || LocalMedia::find($id) !== null) {
             throw new LogicException("Peer connection {$id} already exists.");
         }
 
@@ -112,6 +113,28 @@ final class PeerConnection
         return $this;
     }
 
+    /**
+     * Sends a shared stream instead of opening a capture for this connection
+     * (group mesh calls: one camera, its tracks added to every peer). The
+     * microphone, camera and switch commands of this connection then act on
+     * the shared stream, for every peer using it.
+     */
+    public function localMedia(LocalMedia $media): self
+    {
+        $this->assertConfigurable();
+        if ($media->isClosed()) {
+            throw new LogicException("Local media {$media->id} is closed.");
+        }
+        $this->media = $media;
+
+        return $this;
+    }
+
+    public function sharedMedia(): ?LocalMedia
+    {
+        return $this->media;
+    }
+
     /** Forces TURN relay candidates (iceTransportPolicy = relay). */
     public function relayOnly(bool $relay = true): self
     {
@@ -123,7 +146,7 @@ final class PeerConnection
 
     public function hasVideo(): bool
     {
-        return $this->video;
+        return $this->media?->hasVideo() ?? $this->video;
     }
 
     public function state(): ?RtcConnectionState
@@ -231,17 +254,38 @@ final class PeerConnection
 
     public function enableMicrophone(bool $enabled = true): self
     {
+        if ($this->media !== null) {
+            $this->assertOpen();
+            $this->media->enableMicrophone($enabled);
+
+            return $this;
+        }
+
         return $this->command('setMicrophone', ['enabled' => $enabled]);
     }
 
     public function enableCamera(bool $enabled = true): self
     {
+        if ($this->media !== null) {
+            $this->assertOpen();
+            $this->media->enableCamera($enabled);
+
+            return $this;
+        }
+
         return $this->command('setCamera', ['enabled' => $enabled]);
     }
 
     /** @param (Closure(?CameraFacing): void)|null $done */
     public function switchCamera(?Closure $done = null): self
     {
+        if ($this->media !== null) {
+            $this->assertOpen();
+            $this->media->switchCamera($done);
+
+            return $this;
+        }
+
         return $this->command('switchCamera', [], function (NativeModuleResult $result) use ($done): void {
             $facing = $result->succeeded() ? CameraFacing::tryFrom((int) ($result->values()['facing'] ?? 0)) : null;
             if ($facing !== null) {
@@ -255,7 +299,7 @@ final class PeerConnection
 
     public function currentFacing(): CameraFacing
     {
-        return $this->facing;
+        return $this->media?->currentFacing() ?? $this->facing;
     }
 
     /** @param Closure(?RtcStats): void $done */
@@ -292,6 +336,8 @@ final class PeerConnection
     /** @return array<string, string|int|float|bool> */
     public function nativeConfiguration(): array
     {
+        $shared = $this->media === null ? [] : ['localMediaId' => $this->media->id];
+
         return [
             'sessionId' => $this->id,
             'iceServersJson' => json_encode(
@@ -304,6 +350,7 @@ final class PeerConnection
             'height' => $this->height,
             'fps' => $this->fps,
             'relayOnly' => $this->relayOnly,
+            ...$shared,
         ];
     }
 
@@ -313,10 +360,7 @@ final class PeerConnection
      */
     private function command(string $method, array $values = [], ?Closure $callback = null, bool $reportFailure = true): self
     {
-        if ($this->closed) {
-            throw new LogicException("Peer connection {$this->id} is closed.");
-        }
-        $this->open();
+        $this->assertOpen();
         NativeModules::call(
             self::MODULE,
             $method,
@@ -334,11 +378,20 @@ final class PeerConnection
         return $this;
     }
 
+    private function assertOpen(): void
+    {
+        if ($this->closed) {
+            throw new LogicException("Peer connection {$this->id} is closed.");
+        }
+        $this->open();
+    }
+
     private function open(): void
     {
         if ($this->opened) {
             return;
         }
+        $this->media?->open();
         $this->opened = true;
         NativeModules::call(self::MODULE, 'create', $this->nativeConfiguration(), function (NativeModuleResult $result): void {
             if (!$result->succeeded()) {
