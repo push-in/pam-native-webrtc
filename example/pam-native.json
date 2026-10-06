@@ -1,0 +1,14 @@
+{
+    "$schema": "vendor/pushinbr/pam-native/resources/pam-native.schema.json",
+    "version": 1,
+    "applicationId": "dev.pam.examples.webrtc",
+    "name": "WebRTC Loopback",
+    "entry": "index.php",
+    "runtime": {"php": "8.5", "channel": "stable"},
+    "versionCode": 1,
+    "versionName": "0.1.0",
+    "android": {"minSdk": 26, "targetSdk": 36, "permissions": [], "deepLinks": []},
+    "ios": {"minimumVersion": "15.0"},
+    "modules": [],
+    "views": []
+}
