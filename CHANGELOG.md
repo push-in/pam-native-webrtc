@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 - 2026-10-06
+
+- Add `LocalMedia`, a shared local stream for group (mesh) calls: one
+  microphone track and one camera capturer whose tracks are added to every
+  peer configured with `PeerConnection::localMedia()`. Microphone, camera and
+  front/back switching act on the single capture, so they apply to all peers;
+  peers join (getting the live tracks) and leave without stopping it, and
+  closing the stream detaches the remaining peers before releasing the camera.
+- `RtcVideoView::preview($media)` (and `<RtcVideoView :media="…">`) renders the
+  one local preview of a shared stream.
+- Android (`RtcLocalMedia`) and iOS (`RtcLocalMedia.swift`) implementations
+  with new `media*` module methods and the optional `localMediaId` on
+  `create`; 1:1 sessions are unchanged.
+- Android instrumented mesh test (one capturer feeding two connected peers,
+  shared toggles and switch, late joiner, leaving peer, stream close), its
+  XCTest mirror (uncompiled, needs Mac validation), PHP contract tests and a
+  group loopback example.
+
 ## 0.2.1 - 2026-10-05
 
 - iOS usage descriptions now match `pam-native-media`/`pam-native-camera`, so

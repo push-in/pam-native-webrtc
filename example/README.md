@@ -16,3 +16,11 @@ pam dev            # or: pam build
 The app installs the released package from Packagist. Grant camera and microphone, tap **Start loopback call** and the
 remote view shows the front camera received over WebRTC; try Mute, Switch
 camera and Stats.
+
+## Group (mesh) demo
+
+Set `DEMO` to `'group'` in `index.php` to run `GroupLoopbackCall`: one
+`LocalMedia` stream (a single camera and microphone) feeds two outgoing peer
+connections, each answered inside the app. The preview renders once with
+`RtcVideoView::preview()`, and **Mute all**, **Camera off** and **Switch**
+apply to both peers because they act on the one shared capture.

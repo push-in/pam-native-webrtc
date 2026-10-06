@@ -28,7 +28,7 @@ view tree without ever reaching PHP.
 
 | | |
 | --- | --- |
-| **Best for** | 1:1 voice and video calls, support video chat, telemedicine, walkie-talkie |
+| **Best for** | 1:1 and small-group (mesh) voice and video calls, support video chat, telemedicine, walkie-talkie |
 | **Native path** | WebRTC M124 (`org.jitsi:webrtc` 124.0.0) on Android · GoogleWebRTC M124 (`stasel/WebRTC` Swift package) on iOS |
 | **Application model** | Composer package + generated native integration (`webrtc` and `call-audio` modules, `webrtc.video` view) |
 | **Design rule** | Media and audio routing only; signalling, TURN credentials and the call UI belong to your app |
@@ -38,6 +38,9 @@ view tree without ever reaching PHP.
 - **Peer connections** — offer/answer, trickle ICE, STUN/TURN, ICE restart,
   relay-only policy, microphone and camera toggles, camera switching, stats and
   any number of concurrent sessions.
+- **Group calls** — `LocalMedia` opens one microphone and one camera and adds
+  the same tracks to every peer of a mesh; mute, camera and front/back switch
+  apply to all peers, peers join and leave freely and one preview renders it.
 - **Native video** — `RtcVideoView` renders local and remote tracks (EGL
   `TextureView` on Android, Metal `RTCMTLVideoView` on iOS), composes with
   declarative overlays and rebinds by itself when tracks change.
@@ -158,6 +161,44 @@ command (`startLocal`, `offer`, `setRemote`, …), which also starts the event
 channel. Remote ICE candidates that arrive before `setRemote()` has succeeded
 should be buffered and added afterwards (Zé Chat keeps a pending list).
 
+## Group calls (shared local media)
+
+A mesh call keeps one `PeerConnection` per remote participant. Give them one
+`LocalMedia` stream instead of letting each open the camera (a device has
+only one camera, so a second capture would fail):
+
+```php
+use Pam\Native\WebRtc\{CameraFacing, LocalMedia, PeerConnection, RtcVideoView};
+
+$media = LocalMedia::create()             // one microphone + one camera for the whole call
+    ->video()
+    ->facing(CameraFacing::Front)
+    ->resolution(640, 480, 24)
+    ->onFailure(fn (string $message) => $this->error = $message)
+    ->start();                             // optional: opens the capture before any peer exists
+
+$peer = PeerConnection::create($iceServers, "grp-{$remoteId}")
+    ->localMedia($media)                   // add the shared tracks instead of a new capture
+    ->onIceCandidate(...);
+$peer->startLocal(fn (bool $ok) => $ok && $this->offerTo($remoteId));
+
+$media->enableMicrophone(false);          // every peer
+$media->enableCamera(false);              // stops the camera; tracks stay negotiated (no renegotiation)
+$media->switchCamera(fn (?CameraFacing $facing) => $this->facing = $facing);
+RtcVideoView::preview($media);            // the single local preview (mirrored)
+
+$peer->close();                           // a participant left: the capture keeps running
+$media->close();                          // end of call: detaches remaining peers, releases the camera
+```
+
+- The camera opens once, however many peers attach; a peer created later gets
+  the live tracks at `startLocal()`.
+- `enableMicrophone()`, `enableCamera()` and `switchCamera()` on a peer that
+  uses a stream act on the stream (every peer), so 1:1 code keeps working.
+- `switchCamera()` fails while the camera is off; toggles keep the same track,
+  so remote renderers never rebind.
+- `LocalMedia` ids share the namespace of peer ids (`media-…` by default).
+
 ## Video
 
 ```php
@@ -173,6 +214,9 @@ In templates the plugin registers `<RtcVideoView>`:
 <RtcVideoView :session="$sessionId" track="remote" fit="cover" class="remote-video" />
 <RtcVideoView :session="$sessionId" track="local" mirror="true" class="local-preview" />
 ```
+
+For a shared stream use `<RtcVideoView :media="$media" />` (or the media id
+in `session` with `track="local"`).
 
 `session` accepts a session id or a `PeerConnection`; `track` is `local` or
 `remote` (or `1`/`2`), `fit` is `cover` or `contain`, `mirror` is a boolean.
@@ -270,6 +314,7 @@ All classes live in `Pam\Native\WebRtc`.
 | `facing(CameraFacing $facing)` | Initial camera (default `Front`). |
 | `resolution(int $width, int $height, int $fps = 30)` | 160×120@5 to 3840×2160@60 (default 1280×720@30). |
 | `relayOnly(bool $relay = true)` | `iceTransportPolicy = relay` (TURN only). |
+| `localMedia(LocalMedia $media)`, `sharedMedia(): ?LocalMedia` | Sends a shared stream (group calls) instead of opening a capture; toggles then act on the stream. |
 | `onEvent(Closure(RtcEvent))`, `on(RtcEventKind, Closure(RtcEvent))` | Event listeners. |
 | `onIceCandidate(Closure(IceCandidate))`, `onConnectionState(Closure(RtcConnectionState))`, `onRemoteTrack(Closure(TrackKind))` | Typed shortcuts. |
 | `startLocal(?Closure(bool, string) $done = null)` | Starts the microphone (and camera) and adds the tracks. |
@@ -285,6 +330,21 @@ All classes live in `Pam\Native\WebRtc`.
 | `$id`, `MODULE = 'webrtc'` | |
 
 `dispatch()` is `@internal`.
+
+### `LocalMedia`
+
+| Method | Description |
+| --- | --- |
+| `create(?string $id = null): self` | Id `[A-Za-z0-9_-]{1,128}` (random `media-…`), unique among streams and peers. |
+| `find(string $id): ?self`, `all(): list<self>`, `closeAll(): void` | Stream registry. |
+| `video(bool $enabled = true)`, `facing(CameraFacing $facing)`, `resolution(int $width, int $height, int $fps = 30)` | Capture configuration, before the first operation (audio-only by default). |
+| `start(?Closure(bool, string) $done = null)` | Opens the microphone (and camera) once; peers using the stream start it too. |
+| `enableMicrophone(bool $enabled = true)` | Mutes every peer. |
+| `enableCamera(bool $enabled = true, ?Closure(bool) $done = null)` | Stops/resumes the single camera for every peer. |
+| `switchCamera(?Closure(?CameraFacing) $done = null)` | Front/back for every peer; `null` on failure (camera off, single camera). |
+| `onFailure(Closure(string) $handler)` | Failures of commands sent without a callback. |
+| `close(): void` | Detaches every peer and releases the capture; idempotent. |
+| `hasVideo()`, `isStarted()`, `isCapturingVideo()`, `isMicrophoneEnabled()`, `isCameraEnabled()`, `currentFacing()`, `isClosed()`, `nativeConfiguration()` | Inspection. |
 
 ### `CallAudio`
 
@@ -302,8 +362,9 @@ All classes live in `Pam\Native\WebRtc`.
 
 ### `RtcVideoView` (`Renderable`, immutable)
 
-`make(PeerConnection|string $session, RtcTrack $track = Remote)`,
-`local($session)`, `remote($session)`, `fromProps(array $props)`,
+`make(PeerConnection|LocalMedia|string $session, RtcTrack $track = Remote)`,
+`local($session)`, `remote($session)`, `preview(LocalMedia|string $media)`,
+`fromProps(array $props)`,
 `fit(VideoFit $fit)`, `mirror(bool $mirror = true)`, `properties(): array`,
 `toElement(): Element` (a `CustomView` of kind `webrtc.video`). Give the
 renderer a size: in templates use classes or layout attributes, in PHP style
@@ -336,7 +397,7 @@ a sized `View`.
 - `InvalidArgumentException`: invalid ICE server URLs or credentials, more than
   16 servers, invalid session id, capture outside the supported range, invalid
   candidate or SDP, unsupported SDP type in `fromArray()`.
-- `LogicException`: duplicate session id, configuring after the first
+- `LogicException`: duplicate session or stream id, configuring after the first
   operation, any command on a closed peer ("Peer connection … is closed"),
   any `CallAudio` command after `stop()`.
 - Native failures: `Failure` events (`"Could not create peer connection"`,
@@ -356,6 +417,8 @@ a sized `View`.
   absolute fill); the session id must match the `PeerConnection` id.
 - **Two plugins conflict on iOS camera strings:** keep this package's strings or
   align the other plugin; the generated Info.plist rejects conflicting values.
+- **Second peer of a group call fails with a camera error:** each peer opened
+  its own capture; configure them with `localMedia($media)`.
 - **iOS validation:** the iOS implementation was parse-checked and mirrors the
   Android suite (`ios/Tests/WebRtcTests.swift`) but has not been validated on a
   device yet.
@@ -364,6 +427,7 @@ a sized `View`.
 
 | `pushinbr/pam-native-webrtc` | `pushinbr/pam-native` | Android | iOS |
 | --- | --- | --- | --- |
+| 0.3.0 | `>=1.0.35 <2.0.0` (tested with 1.14.x) | API 26+, WebRTC M124 | 15+, GoogleWebRTC M124 |
 | 0.2.1 | `>=1.0.35 <2.0.0` (tested with 1.14.x) | API 26+, WebRTC M124 | 15+, GoogleWebRTC M124 |
 | 0.2.0 | `>=1.0.35 <2.0.0` | API 26+ | 15+ (Info.plist strings conflict with `pam-native-media`) |
 | 0.1.x | `>=1.0.35 <2.0.0` | API 26+ | Not supported |
@@ -377,8 +441,10 @@ cd android && ../../pam-native/android/gradlew -p . connectedDebugAndroidTest   
 
 The instrumented suite runs a real loopback call between two sessions (camera
 capture, offer/answer, trickle ICE through the event channel, remote frames in
-`RtcVideoView`, stats), session isolation, event-channel semantics and the
-call audio state machine. `ios/Tests/WebRtcTests.swift` mirrors it with XCTest.
+`RtcVideoView`, stats), a shared `LocalMedia` mesh (one capturer feeding
+several connected peers, preview, shared toggles and switch, a late joiner, a
+leaving peer and stream close), session isolation, event-channel semantics and
+the call audio state machine. `ios/Tests/WebRtcTests.swift` mirrors it with XCTest.
 
 ## License
 
