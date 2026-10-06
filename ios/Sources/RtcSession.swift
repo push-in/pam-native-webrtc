@@ -12,6 +12,8 @@ struct RtcSessionConfig {
     let height: Int
     let fps: Int
     let relayOnly: Bool
+    /// Shared `RtcLocalMedia` feeding this peer; empty opens a capture for this session only.
+    var localMediaId: String = ""
 }
 
 /// Process-wide factory, sessions and renderer bindings (Android WebRtcRuntime).
@@ -20,6 +22,7 @@ public enum WebRtcRuntime {
     static let trackRemote = 2
     private static let lock = NSLock()
     private static var sessions: [String: RtcSession] = [:]
+    private static var medias: [String: RtcLocalMedia] = [:]
     private static var observers: [String: [UUID: (RTCVideoTrack?) -> Void]] = [:]
     private static let sessionPattern = "^[A-Za-z0-9_-]{1,128}$"
 
@@ -35,7 +38,14 @@ public enum WebRtcRuntime {
         guard config.id.range(of: sessionPattern, options: .regularExpression) != nil else {
             throw RtcError("Invalid session id")
         }
+        guard config.localMediaId.isEmpty || config.localMediaId.range(of: sessionPattern, options: .regularExpression) != nil else {
+            throw RtcError("Invalid local media id")
+        }
         lock.lock()
+        if medias[config.id] != nil {
+            lock.unlock()
+            throw RtcError("Id \(config.id) belongs to a local media stream")
+        }
         let previous = sessions.removeValue(forKey: config.id)
         lock.unlock()
         previous?.close()
@@ -72,24 +82,73 @@ public enum WebRtcRuntime {
 
     public static func closeAll() {
         sessionIds().forEach(close)
+        mediaIds().forEach(closeMedia)
+    }
+
+    static func createMedia(_ config: RtcMediaConfig) throws -> RtcLocalMedia {
+        guard config.id.range(of: sessionPattern, options: .regularExpression) != nil else {
+            throw RtcError("Invalid local media id")
+        }
+        lock.lock()
+        if sessions[config.id] != nil {
+            lock.unlock()
+            throw RtcError("Id \(config.id) belongs to a peer connection")
+        }
+        let previous = medias.removeValue(forKey: config.id)
+        lock.unlock()
+        previous?.close()
+        let media = RtcLocalMedia(config: config, factory: factory)
+        lock.lock()
+        medias[config.id] = media
+        lock.unlock()
+        return media
+    }
+
+    public static func media(_ id: String) -> RtcLocalMedia? {
+        lock.lock()
+        defer { lock.unlock() }
+        return medias[id]
+    }
+
+    static func mediaOrThrow(_ id: String) throws -> RtcLocalMedia {
+        guard let media = media(id) else { throw RtcError("Local media \(id) not found") }
+        return media
+    }
+
+    public static func mediaIds() -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return Set(medias.keys)
+    }
+
+    /// Closes a shared stream: attached peers stop sending it, then the capture is released.
+    public static func closeMedia(_ id: String) {
+        lock.lock()
+        let media = medias.removeValue(forKey: id)
+        lock.unlock()
+        media?.close()
     }
 
     /// Mutes or unmutes every local microphone (CallAudio `setMicrophoneMute`).
     static func setAllMicrophones(enabled: Bool) {
         lock.lock()
         let all = Array(sessions.values)
+        let streams = Array(medias.values)
         lock.unlock()
         all.forEach { $0.setMicrophone(enabled) }
+        streams.forEach { $0.setMicrophone(enabled) }
     }
 
-    /// Observes a session track on the main thread, immediately and on every change.
+    /// Observes a session track (or a local media preview, by media id and `trackLocal`) on the main thread, immediately and on every change.
     static func observe(_ sessionId: String, track: Int, observer: @escaping (RTCVideoTrack?) -> Void) -> () -> Void {
         let key = key(sessionId, track)
         let token = UUID()
         lock.lock()
         observers[key, default: [:]][token] = observer
-        let current = sessions[sessionId]?.videoTrack(track)
+        let stream = track == trackLocal ? medias[sessionId] : nil
+        let session = sessions[sessionId]
         lock.unlock()
+        let current = session?.videoTrack(track) ?? stream?.videoTrack
         onMain { observer(current) }
         return {
             lock.lock()
@@ -145,6 +204,10 @@ public final class RtcSession: NSObject, RTCPeerConnectionDelegate, @unchecked S
     private var capturing = false
     private var front: Bool
     private var closed = false
+    private var sharedAudioSender: RTCRtpSender?
+    private var sharedVideoSender: RTCRtpSender?
+    /// Shared stream this peer sends, or nil when it owns its capture (1:1 calls).
+    private(set) var localMedia: RtcLocalMedia?
     private(set) var localVideo: RTCVideoTrack?
     private(set) var remoteVideo: RTCVideoTrack?
     private(set) var connectionState: Int64 = 1
@@ -177,10 +240,17 @@ public final class RtcSession: NSObject, RTCPeerConnectionDelegate, @unchecked S
         track == WebRtcRuntime.trackLocal ? localVideo : remoteVideo
     }
 
-    var hasLocalAudio: Bool { localAudio != nil }
-    var isCapturing: Bool { capturing }
+    var hasLocalAudio: Bool { localAudio != nil || sharedAudioSender != nil }
+    var isCapturing: Bool { localMedia?.capturing ?? capturing }
+    var usesSharedMedia: Bool { !config.localMediaId.isEmpty }
+    /// Tracks this peer currently sends from its shared stream (audio, video).
+    var sharedSenderCount: Int { [sharedAudioSender, sharedVideoSender].compactMap { $0 }.count }
 
     func startLocal(_ completion: @escaping ModuleCompletion) {
+        if usesSharedMedia {
+            startShared(completion)
+            return
+        }
         execute(completion) { done in
             if self.localAudio == nil {
                 let source = self.factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
@@ -213,6 +283,64 @@ public final class RtcSession: NSObject, RTCPeerConnectionDelegate, @unchecked S
                 self.emit(Self.eventLocalReady)
                 done(nil)
             }
+        }
+    }
+
+    private func startShared(_ completion: @escaping ModuleCompletion) {
+        execute(completion) { done in
+            let media = try WebRtcRuntime.mediaOrThrow(self.config.localMediaId)
+            self.localMedia = media
+            try media.attach(self)
+            media.ensureStarted { error in
+                self.queue.async {
+                    if let error {
+                        if error.lowercased().contains("camera") {
+                            self.emit(Self.eventFailure, ["message": .text(error)])
+                        }
+                        done(error)
+                        return
+                    }
+                    self.attachSharedTracks(media)
+                    self.emit(Self.eventLocalReady)
+                    done(nil)
+                }
+            }
+        }
+    }
+
+    /// Called by the shared stream when its tracks appear; idempotent.
+    func syncLocalMedia() {
+        queue.async {
+            if let media = self.localMedia { self.attachSharedTracks(media) }
+        }
+    }
+
+    /// Runs on the session queue.
+    private func attachSharedTracks(_ media: RtcLocalMedia) {
+        guard !closed, localMedia === media else { return }
+        let streams = ["stream-\(media.id)"]
+        if let audio = media.audioTrack, sharedAudioSender == nil {
+            sharedAudioSender = peer.add(audio, streamIds: streams)
+        }
+        if let video = media.videoTrack, sharedVideoSender == nil {
+            sharedVideoSender = peer.add(video, streamIds: streams)
+            localVideo = video
+            WebRtcRuntime.publish(id, track: WebRtcRuntime.trackLocal, value: video)
+        }
+    }
+
+    /// The shared stream is closing: stop sending its tracks.
+    func detachLocalMedia(_ media: RtcLocalMedia) {
+        WebRtcRuntime.publish(id, track: WebRtcRuntime.trackLocal, value: nil, wait: !Thread.isMainThread)
+        queue.async {
+            guard self.localMedia === media else { return }
+            if !self.closed {
+                [self.sharedAudioSender, self.sharedVideoSender].compactMap { $0 }.forEach { _ = self.peer.removeTrack($0) }
+            }
+            self.sharedAudioSender = nil
+            self.sharedVideoSender = nil
+            self.localVideo = nil
+            self.localMedia = nil
         }
     }
 
@@ -261,10 +389,15 @@ public final class RtcSession: NSObject, RTCPeerConnectionDelegate, @unchecked S
     }
 
     func setMicrophone(_ enabled: Bool) {
+        localMedia?.setMicrophone(enabled)
         localAudio?.isEnabled = enabled
     }
 
     func setCamera(_ enabled: Bool, _ completion: @escaping ModuleCompletion) {
+        if let localMedia {
+            localMedia.setCamera(enabled, completion)
+            return
+        }
         execute(completion) { done in
             guard let capturer = self.capturer, enabled != self.capturing else {
                 self.localVideo?.isEnabled = enabled
@@ -289,6 +422,10 @@ public final class RtcSession: NSObject, RTCPeerConnectionDelegate, @unchecked S
     }
 
     func switchCamera(_ completion: @escaping ModuleCompletion) {
+        if let localMedia {
+            localMedia.switchCamera(completion)
+            return
+        }
         guard let capturer else {
             fail(completion, "No camera is capturing")
             return
@@ -375,6 +512,8 @@ public final class RtcSession: NSObject, RTCPeerConnectionDelegate, @unchecked S
         guard !closed else { return }
         closed = true
         events.close()
+        // A shared stream outlives its peers: only this peer's senders go away with it.
+        localMedia?.detach(self)
         // Detach renderers before tracks are released.
         WebRtcRuntime.publish(id, track: WebRtcRuntime.trackLocal, value: nil, wait: !Thread.isMainThread)
         WebRtcRuntime.publish(id, track: WebRtcRuntime.trackRemote, value: nil, wait: !Thread.isMainThread)
@@ -445,8 +584,7 @@ public final class RtcSession: NSObject, RTCPeerConnectionDelegate, @unchecked S
     }
 
     private func device(front: Bool) -> AVCaptureDevice? {
-        let devices = RTCCameraVideoCapturer.captureDevices()
-        return devices.first { ($0.position == .front) == front } ?? devices.first
+        RtcCamera.device(front: front)
     }
 
     private func startCapture(
@@ -454,19 +592,7 @@ public final class RtcSession: NSObject, RTCPeerConnectionDelegate, @unchecked S
         device: AVCaptureDevice,
         completion: @escaping (Error?) -> Void
     ) {
-        let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
-        let target = config.width * config.height
-        let format = formats.min { lhs, rhs in
-            let a = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
-            let b = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
-            return abs(Int(a.width) * Int(a.height) - target) < abs(Int(b.width) * Int(b.height) - target)
-        }
-        guard let format else {
-            completion(RtcError("Could not open camera"))
-            return
-        }
-        let maxFps = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30
-        capturer.startCapture(with: device, format: format, fps: min(config.fps, Int(maxFps)), completionHandler: completion)
+        RtcCamera.start(capturer, device: device, width: config.width, height: config.height, fps: config.fps, completion: completion)
     }
 
     private func emit(_ kind: Int64, _ values: [String: WireValue] = [:]) {

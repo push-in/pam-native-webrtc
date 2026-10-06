@@ -10,6 +10,10 @@ public final class WebRtcModule: NativeModule, ClosableNativeModule, @unchecked 
     public func invoke(method: String, payload: Data, completion: @escaping ModuleCompletion) {
         do {
             let values = try WireMap.decode(payload)
+            if method.hasPrefix("media") {
+                try media(method, values, completion)
+                return
+            }
             let id = try values.text("sessionId")
             switch method {
             case "create":
@@ -21,7 +25,8 @@ public final class WebRtcModule: NativeModule, ClosableNativeModule, @unchecked 
                     width: Int(min(max(values.integer("width", 1_280), 160), 3_840)),
                     height: Int(min(max(values.integer("height", 720), 120), 2_160)),
                     fps: Int(min(max(values.integer("fps", 30), 5), 60)),
-                    relayOnly: values.flag("relayOnly")
+                    relayOnly: values.flag("relayOnly"),
+                    localMediaId: values.text("localMediaId", "")
                 ))
                 succeed(completion)
             case "next":
@@ -64,6 +69,38 @@ public final class WebRtcModule: NativeModule, ClosableNativeModule, @unchecked 
             }
         } catch {
             fail(completion, error.localizedDescription)
+        }
+    }
+
+    /// Shared local media streams (`LocalMedia` in PHP) addressed by media id.
+    private func media(_ method: String, _ values: [String: WireValue], _ completion: @escaping ModuleCompletion) throws {
+        let id = try values.text("mediaId")
+        switch method {
+        case "mediaCreate":
+            _ = try WebRtcRuntime.createMedia(RtcMediaConfig(
+                id: id,
+                video: values.flag("video"),
+                facing: Int(values.integer("facing", 1)),
+                width: Int(min(max(values.integer("width", 1_280), 160), 3_840)),
+                height: Int(min(max(values.integer("height", 720), 120), 2_160)),
+                fps: Int(min(max(values.integer("fps", 30), 5), 60))
+            ))
+            succeed(completion)
+        case "mediaStart":
+            try WebRtcRuntime.mediaOrThrow(id).start(completion)
+        case "mediaSetMicrophone":
+            let media = try WebRtcRuntime.mediaOrThrow(id)
+            media.setMicrophone(values.flag("enabled", true))
+            succeed(completion, media.snapshot())
+        case "mediaSetCamera":
+            try WebRtcRuntime.mediaOrThrow(id).setCamera(values.flag("enabled", true), completion)
+        case "mediaSwitchCamera":
+            try WebRtcRuntime.mediaOrThrow(id).switchCamera(completion)
+        case "mediaClose":
+            WebRtcRuntime.closeMedia(id)
+            succeed(completion)
+        default:
+            throw RtcError("Unknown WebRTC method \(method)")
         }
     }
 
