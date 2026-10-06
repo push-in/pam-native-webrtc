@@ -19,6 +19,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -162,6 +163,161 @@ class WebRtcInstrumentedTest {
         assertNull(WebRtcRuntime.session("callee"))
         assertFalse(rtc("next", "callee").ok)
         onMain { factory.release(container) }
+    }
+
+    private fun media(method: String, media: String, vararg values: Pair<String, WireValue>) =
+        call(module, method, mapOf("mediaId" to WireValue.Text(media), *values))
+
+    private fun createShared(session: String, media: String) = rtc(
+        "create",
+        session,
+        "iceServersJson" to WireValue.Text("[]"),
+        "video" to WireValue.Flag(false),
+        "localMediaId" to WireValue.Text(media),
+    ).also { assertTrue(it.message, it.ok) }
+
+    /** Signals one caller/callee pair through in-process pumps and waits until both sides connect. */
+    private fun connect(caller: String, callee: String): MutableList<Long> {
+        val callerStates = mutableListOf<Long>()
+        val calleeStates = mutableListOf<Long>()
+        val calleeTracks = mutableListOf<Long>()
+        pump(caller, callee, callerStates, mutableListOf())
+        pump(callee, caller, calleeStates, calleeTracks)
+        assertTrue(rtc("startLocal", caller).ok)
+        assertTrue(rtc("startLocal", callee).ok)
+        val offer = rtc("createOffer", caller)
+        assertTrue(offer.message, offer.ok)
+        assertTrue(rtc("setRemoteDescription", callee, "type" to WireValue.Integer(1), "sdp" to offer.values.getValue("sdp")).ok)
+        val answer = rtc("createAnswer", callee)
+        assertTrue(answer.message, answer.ok)
+        assertTrue(rtc("setRemoteDescription", caller, "type" to WireValue.Integer(2), "sdp" to answer.values.getValue("sdp")).ok)
+        waitUntil(20_000) { synchronized(calleeStates) { 3L in calleeStates } && synchronized(callerStates) { 3L in callerStates } }
+        return calleeTracks
+    }
+
+    private fun renderer(factory: RtcVideoViewFactory, session: String, track: Long): RtcVideoContainer {
+        val container = onMain { factory.create(context) {} as RtcVideoContainer }
+        onMain {
+            factory.update(
+                container,
+                mapOf(
+                    "sessionId" to WireValue.Text(session),
+                    "track" to WireValue.Integer(track),
+                    "fit" to WireValue.Integer(1),
+                    "mirror" to WireValue.Flag(track == 1L),
+                ),
+            )
+        }
+        return container
+    }
+
+    @Test
+    fun sharedLocalMediaFeedsEveryPeerFromOneCapture() {
+        val created = media(
+            "mediaCreate",
+            "local",
+            "video" to WireValue.Flag(true),
+            "facing" to WireValue.Integer(1),
+            "width" to WireValue.Integer(640),
+            "height" to WireValue.Integer(480),
+            "fps" to WireValue.Integer(15),
+        )
+        assertTrue(created.message, created.ok)
+        assertFalse("media and session ids share one namespace", rtc("create", "local").ok)
+        val started = media("mediaStart", "local")
+        assertTrue(started.message, started.ok)
+        assertTrue((started.values["video"] as WireValue.Flag).value)
+        val shared = WebRtcRuntime.media("local")!!
+        val track = shared.videoTrack!!
+        assertTrue(shared.isCapturing())
+
+        // One local preview bound to the stream id, before any peer exists.
+        val factory = RtcVideoViewFactory(context)
+        val preview = renderer(factory, "local", 1)
+        waitUntil(15_000) { preview.renderer.framesRendered > 3 }
+        assertSame(track, onMain { preview.renderer.boundTrack() })
+
+        // Mesh: every peer sends the same tracks; the camera opens once.
+        createShared("a1", "local")
+        createShared("a2", "local")
+        create("b1", video = false)
+        create("b2", video = false)
+        val tracks1 = connect("a1", "b1")
+        val tracks2 = connect("a2", "b2")
+        assertTrue(synchronized(tracks1) { 2L in tracks1 && 1L in tracks1 })
+        assertTrue(synchronized(tracks2) { 2L in tracks2 && 1L in tracks2 })
+        assertEquals(1, shared.capturerCount())
+        assertEquals(setOf("a1", "a2"), shared.attachedSessionIds())
+        listOf("a1", "a2").forEach {
+            val session = WebRtcRuntime.session(it)!!
+            assertSame(track, session.localVideo)
+            assertEquals(2, session.sharedSenderCount())
+            assertTrue(session.hasLocalAudio())
+        }
+        val remote1 = renderer(factory, "b1", 2)
+        val remote2 = renderer(factory, "b2", 2)
+        waitUntil(15_000) { remote1.renderer.framesRendered > 5 && remote2.renderer.framesRendered > 5 }
+        listOf("a1", "a2").forEach {
+            val stats = rtc("stats", it)
+            assertTrue((stats.values["bytesSent"] as WireValue.Integer).value > 0)
+        }
+
+        // Toggles through any peer (or the stream) apply to every peer.
+        assertTrue(rtc("setCamera", "a1", "enabled" to WireValue.Flag(false)).ok)
+        assertFalse(shared.isCapturing())
+        assertFalse(WebRtcRuntime.session("a2")!!.isCapturing())
+        assertFalse(track.enabled())
+        assertFalse(media("mediaSwitchCamera", "local").ok)
+        val cameraOn = media("mediaSetCamera", "local", "enabled" to WireValue.Flag(true))
+        assertTrue(cameraOn.ok)
+        assertTrue((cameraOn.values["camera"] as WireValue.Flag).value)
+        assertTrue(shared.isCapturing() && track.enabled())
+        assertTrue(rtc("setMicrophone", "a2", "enabled" to WireValue.Flag(false)).ok)
+        assertFalse(shared.audioTrack!!.enabled())
+        assertTrue(media("mediaSetMicrophone", "local", "enabled" to WireValue.Flag(true)).ok)
+        assertTrue(shared.audioTrack!!.enabled())
+
+        // Front/back switch keeps the same track on every peer.
+        if (org.webrtc.Camera2Enumerator(context).deviceNames.size > 1) {
+            val switched = media("mediaSwitchCamera", "local")
+            assertTrue(switched.message, switched.ok)
+            assertEquals(2L, (switched.values["facing"] as WireValue.Integer).value)
+            assertSame(track, WebRtcRuntime.session("a2")!!.localVideo)
+            val viaPeer = rtc("switchCamera", "a1")
+            assertTrue(viaPeer.message, viaPeer.ok)
+            assertEquals(1L, (viaPeer.values["facing"] as WireValue.Integer).value)
+        }
+        assertEquals(1, shared.capturerCount())
+
+        // A late joiner gets the live tracks; a leaving peer does not stop the others.
+        createShared("a3", "local")
+        assertTrue(rtc("startLocal", "a3").ok)
+        assertEquals(2, WebRtcRuntime.session("a3")!!.sharedSenderCount())
+        assertTrue(rtc("close", "a1").ok)
+        assertEquals(setOf("a2", "a3"), shared.attachedSessionIds())
+        assertTrue(shared.isCapturing())
+        val before = remote2.renderer.framesRendered
+        waitUntil(10_000) { remote2.renderer.framesRendered > before + 5 }
+        assertSame(track, onMain { preview.renderer.boundTrack() })
+
+        // Closing the stream detaches every peer and the preview, peers stay usable.
+        assertTrue(media("mediaClose", "local").ok)
+        assertNull(WebRtcRuntime.media("local"))
+        assertNull(onMain { preview.renderer.boundTrack() })
+        assertEquals(0, WebRtcRuntime.session("a2")!!.sharedSenderCount())
+        assertNull(WebRtcRuntime.session("a2")!!.localVideo)
+        assertTrue(rtc("stats", "a2").ok)
+        assertFalse(media("mediaStart", "local").ok)
+        assertFalse(rtc("startLocal", "a3").ok)
+        listOf(preview, remote1, remote2).forEach { onMain { factory.release(it) } }
+    }
+
+    @Test
+    fun sharedPeerWithoutItsStreamFailsToStart() {
+        createShared("orphan", "missing")
+        val started = rtc("startLocal", "orphan")
+        assertFalse(started.ok)
+        assertTrue(started.message, started.message.contains("missing"))
     }
 
     @Test

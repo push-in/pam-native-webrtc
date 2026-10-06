@@ -36,6 +36,7 @@ use Pam\Native\WebRtc\CallAudioRoute;
 use Pam\Native\WebRtc\CameraFacing;
 use Pam\Native\WebRtc\IceCandidate;
 use Pam\Native\WebRtc\IceServer;
+use Pam\Native\WebRtc\LocalMedia;
 use Pam\Native\WebRtc\PeerConnection;
 use Pam\Native\WebRtc\RtcConnectionState;
 use Pam\Native\WebRtc\RtcEvent;
@@ -69,12 +70,14 @@ $throws = static function (string $class, Closure $body) use ($check): void {
 };
 $fake = static function (): FakeNativeModuleTransport {
     PeerConnection::closeAll();
+    LocalMedia::closeAll();
 
     return NativeTestHarness::install();
 };
-$payload = static fn (FakeNativeModuleTransport $transport, string $method): array => Wire::decodeMap(
-    array_values(array_filter($transport->calls(), static fn ($call): bool => $call->method === $method))[0]->payload,
+$payload = static fn (FakeNativeModuleTransport $transport, string $method, int $index = 0): array => Wire::decodeMap(
+    array_values(array_filter($transport->calls(), static fn ($call): bool => $call->method === $method))[$index]->payload,
 );
+$methods = static fn (FakeNativeModuleTransport $transport): array => array_map(static fn ($call): string => $call->method, $transport->calls());
 
 $test('coded variants are sequential integers from one', static function () use ($check): void {
     foreach ([
@@ -258,6 +261,125 @@ $test('call audio applies fluent commands in order and reports routes', static f
     $check(CallAudio::active() === null && !$audio->isActive(), 'still active');
     $throws(LogicException::class, static fn () => $audio->speaker());
     NativeTestHarness::uninstall();
+});
+
+$test('a shared local media stream feeds every peer from one native capture', static function () use ($fake, $payload, $methods, $check): void {
+    $transport = $fake();
+    $transport->succeed('webrtc', 'mediaCreate')
+        ->succeed('webrtc', 'mediaStart', ['video' => true, 'facing' => 1, 'microphone' => true, 'camera' => true, 'peers' => 0])
+        ->succeed('webrtc', 'create')->succeed('webrtc', 'create')
+        ->succeed('webrtc', 'next', [], DispatchMode::Deferred)->succeed('webrtc', 'next', [], DispatchMode::Deferred)
+        ->succeed('webrtc', 'startLocal')->succeed('webrtc', 'startLocal')
+        ->succeed('webrtc', 'close')->succeed('webrtc', 'close')->succeed('webrtc', 'mediaClose');
+    $media = LocalMedia::create('local')->video()->facing(CameraFacing::Front)->resolution(640, 480, 15);
+    $check($transport->calls() === [], 'stream opened before first operation');
+    $started = null;
+    $media->start(static function (bool $ok) use (&$started): void {
+        $started = $ok;
+    });
+    $check($started === true && $media->isStarted() && $media->isCapturingVideo(), 'stream not started');
+    $peers = [];
+    foreach (['grp-a', 'grp-b'] as $id) {
+        $peers[$id] = PeerConnection::create(id: $id)->localMedia($media);
+        $check($peers[$id]->sharedMedia() === $media && $peers[$id]->hasVideo(), 'peer not bound to the stream');
+        $peers[$id]->startLocal();
+    }
+    $check($methods($transport) === ['mediaCreate', 'mediaStart', 'create', 'next', 'startLocal', 'create', 'next', 'startLocal'], implode(',', $methods($transport)));
+    $check($payload($transport, 'mediaCreate') === ['facing' => 1, 'fps' => 15, 'height' => 480, 'mediaId' => 'local', 'video' => true, 'width' => 640], 'stream payload');
+    $check($payload($transport, 'create')['localMediaId'] === 'local' && $payload($transport, 'create', 1)['localMediaId'] === 'local', 'peers not sharing');
+    $check($payload($transport, 'create')['video'] === false, 'a shared peer opened its own camera');
+
+    // A peer leaving keeps the stream; closing the stream releases it once.
+    $peers['grp-a']->close();
+    $check(!$media->isClosed() && LocalMedia::find('local') === $media, 'stream closed with a peer');
+    $media->close();
+    $media->close();
+    $transport->assertCalled('webrtc', 'mediaClose', 1);
+    $check(LocalMedia::find('local') === null && $media->isClosed(), 'stream not unregistered');
+    $peers['grp-b']->close();
+    NativeTestHarness::uninstall();
+});
+
+$test('peer toggles act on the shared stream for every peer', static function () use ($fake, $payload, $methods, $check): void {
+    $transport = $fake();
+    $transport->succeed('webrtc', 'mediaCreate')->succeed('webrtc', 'create')->succeed('webrtc', 'next', [], DispatchMode::Deferred)
+        ->succeed('webrtc', 'mediaSetMicrophone', ['microphone' => false])
+        ->succeed('webrtc', 'mediaSetCamera', ['camera' => false])
+        ->fail('webrtc', 'mediaSwitchCamera', 'Camera is off')
+        ->succeed('webrtc', 'mediaSetCamera', ['camera' => true])
+        ->succeed('webrtc', 'mediaSwitchCamera', ['facing' => 2])
+        ->succeed('webrtc', 'mediaSwitchCamera', ['facing' => 1]);
+    $media = LocalMedia::create('shared')->video();
+    $pc = PeerConnection::create(id: 'grp-1')->localMedia($media);
+    $pc->enableMicrophone(false);
+    $pc->enableCamera(false);
+    $check(!$media->isMicrophoneEnabled() && !$media->isCameraEnabled(), 'stream state not tracked');
+    $failed = 'unset';
+    $pc->switchCamera(static function (?CameraFacing $facing) use (&$failed): void {
+        $failed = $facing;
+    });
+    $check($failed === null, 'switch with the camera off should fail');
+    $cameraOn = null;
+    $media->enableCamera(true, static function (bool $ok) use (&$cameraOn): void {
+        $cameraOn = $ok;
+    });
+    $media->switchCamera();
+    $check($cameraOn === true && $media->currentFacing() === CameraFacing::Back && $pc->currentFacing() === CameraFacing::Back, 'switch not shared');
+    $pc->switchCamera();
+    $check($media->currentFacing() === CameraFacing::Front, 'switch through the peer');
+    $check($methods($transport) === ['mediaCreate', 'create', 'next', 'mediaSetMicrophone', 'mediaSetCamera', 'mediaSwitchCamera', 'mediaSetCamera', 'mediaSwitchCamera', 'mediaSwitchCamera'], implode(',', $methods($transport)));
+    $check($payload($transport, 'mediaSetCamera') === ['enabled' => false, 'mediaId' => 'shared'], 'camera payload');
+    $check(!in_array('setMicrophone', $methods($transport), true) && !in_array('setCamera', $methods($transport), true), 'per-session toggles used');
+    NativeTestHarness::uninstall();
+});
+
+$test('shared stream failures and guards', static function () use ($fake, $check, $throws): void {
+    $transport = $fake();
+    $transport->succeed('webrtc', 'mediaCreate')->fail('webrtc', 'mediaSetCamera', 'camera busy')->fail('webrtc', 'mediaStart', 'No camera available');
+    $messages = [];
+    $media = LocalMedia::create('guarded-media')->video()->onFailure(static function (string $message) use (&$messages): void {
+        $messages[] = $message;
+    });
+    $throws(LogicException::class, static fn () => LocalMedia::create('guarded-media'));
+    $throws(InvalidArgumentException::class, static fn () => LocalMedia::create('bad id'));
+    $throws(InvalidArgumentException::class, static fn () => LocalMedia::create()->resolution(10, 10));
+    $media->enableCamera(false);
+    $check($media->isCameraEnabled() && $messages === ['mediaSetCamera: camera busy'], 'camera failure not surfaced or reverted');
+    $media->start();
+    $check(!$media->isStarted() && $messages[1] === 'mediaStart: No camera available', 'start failure');
+    $throws(LogicException::class, static fn () => $media->video(false));
+    $throws(LogicException::class, static fn () => PeerConnection::create(id: 'guarded-media'));
+    $pc = PeerConnection::create(id: 'guarded-peer');
+    $throws(LogicException::class, static fn () => LocalMedia::create('guarded-peer'));
+    $closed = LocalMedia::create('closed-media');
+    $closed->close();
+    $throws(LogicException::class, static fn () => $pc->localMedia($closed));
+    $throws(LogicException::class, static fn () => $closed->start());
+    $transport->assertCalled('webrtc', 'mediaClose', 0);
+    $check(str_starts_with(LocalMedia::create()->id, 'media-'), 'default id');
+    $pc->close();
+    NativeTestHarness::uninstall();
+});
+
+$test('one local preview renders the shared stream', static function () use ($check): void {
+    LocalMedia::closeAll();
+    $media = LocalMedia::create('preview-media');
+    $check(RtcVideoView::preview($media)->properties() === ['sessionId' => 'preview-media', 'track' => 1, 'fit' => 1, 'mirror' => true], 'preview props');
+    $check(RtcVideoView::make($media)->properties()['track'] === 1, 'a stream has only a local track');
+    $check(RtcVideoView::fromProps(['media' => $media, 'fit' => 'contain'])->properties() === ['sessionId' => 'preview-media', 'track' => 1, 'fit' => 2, 'mirror' => true], 'template media prop');
+    $check(RtcVideoView::fromProps(['media' => 'preview-media'])->properties()['track'] === 1, 'template media id');
+    $media->close();
+});
+
+$test('native modules implement the shared media contract on both platforms', static function () use ($check): void {
+    $root = dirname(__DIR__);
+    $android = (string) file_get_contents($root.'/android/src/main/kotlin/dev/pam/webrtc/WebRtcModule.kt');
+    $ios = (string) file_get_contents($root.'/ios/Sources/WebRtcModule.swift');
+    foreach (['mediaCreate', 'mediaStart', 'mediaSetMicrophone', 'mediaSetCamera', 'mediaSwitchCamera', 'mediaClose', 'localMediaId'] as $method) {
+        $check(str_contains($android, "\"{$method}\""), "android {$method}");
+        $check(str_contains($ios, "\"{$method}\""), "ios {$method}");
+    }
+    $check(is_file($root.'/android/src/main/kotlin/dev/pam/webrtc/RtcLocalMedia.kt') && is_file($root.'/ios/Sources/RtcLocalMedia.swift'), 'native stream classes');
 });
 
 $test('plugin manifest targets PAM Native 1.0.35 and declares runtime permissions', static function () use ($check): void {
