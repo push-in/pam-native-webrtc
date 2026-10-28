@@ -1,0 +1,10 @@
+name: Publication compatibility
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ecosystem-compatibility:
+    uses: push-in/pam/.github/workflows/ecosystem-compatibility.yml@main
