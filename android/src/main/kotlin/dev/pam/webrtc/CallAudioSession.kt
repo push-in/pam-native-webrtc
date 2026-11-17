@@ -44,7 +44,7 @@ class CallAudioSession private constructor(context: Context) {
     private var preferBluetooth = true
     private var proximityEnabled = true
     private var previousMode = AudioManager.MODE_NORMAL
-    private var focusRequest: AudioFocusRequest? = null
+    private var focusRequest: Any? = null // AudioFocusRequest (API 26+) or the legacy listener
     private var ringback: ToneGenerator? = null
     private var ringtone: Ringtone? = null
     private var vibrator: Vibrator? = null
@@ -98,8 +98,7 @@ class CallAudioSession private constructor(context: Context) {
         }
         audio.isMicrophoneMute = false
         audio.mode = previousMode
-        focusRequest?.let(audio::abandonAudioFocusRequest)
-        focusRequest = null
+        abandonFocus()
         lastRoute = 0
     }
 
@@ -241,7 +240,31 @@ class CallAudioSession private constructor(context: Context) {
         scoStarted = false
     }
 
+    // Android 7.x: the deprecated stream-based focus with this listener.
+    private val legacyFocusListener = AudioManager.OnAudioFocusChangeListener { }
+
+    private fun abandonFocus() {
+        val focus = focusRequest ?: return
+        focusRequest = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && focus is AudioFocusRequest) {
+            audio.abandonAudioFocusRequest(focus)
+        } else {
+            @Suppress("DEPRECATION")
+            audio.abandonAudioFocus(legacyFocusListener)
+        }
+    }
+
     private fun requestFocus() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            @Suppress("DEPRECATION")
+            audio.requestAudioFocus(
+                legacyFocusListener,
+                AudioManager.STREAM_VOICE_CALL,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
+            )
+            focusRequest = legacyFocusListener
+            return
+        }
         val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -296,6 +319,16 @@ class CallAudioSession private constructor(context: Context) {
             context.getSystemService(Vibrator::class.java)
         }
         if (!device.hasVibrator()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            @Suppress("DEPRECATION")
+            device.vibrate(
+                VIBRATION_PATTERN,
+                0,
+                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build(),
+            )
+            vibrator = device
+            return
+        }
         val effect = VibrationEffect.createWaveform(VIBRATION_PATTERN, 0)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             device.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_RINGTONE))

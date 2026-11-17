@@ -54,7 +54,7 @@ The full walk-through (peer connection, group calls with `LocalMedia`, `RtcVideo
 
 | Platform | Support | Notes |
 | --- | --- | --- |
-| Android | API 26+ | WebRTC M124 (`org.jitsi:webrtc` 124.0.0) |
+| Android | API 24+ | WebRTC M124 (`org.jitsi:webrtc` 124.0.0) |
 | iOS | 15.0+ | GoogleWebRTC M124 (`stasel/WebRTC` Swift package); not validated on a device yet |
 | PAM Native | 1.0.35 to < 2.0.0 | From `pam-native.plugin.json`; PHP 8.5+ |
 
