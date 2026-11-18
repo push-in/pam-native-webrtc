@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 - 2026-11-18
+
+- The optional Bluetooth headset permission no longer makes `android.hardware.bluetooth` an implied required feature: the manifest declares it `required="false"`, so Google Play keeps offering apps to devices without Bluetooth.
+
 ## 0.3.1 - 2026-11-17
 
 - Android 7.0/7.1 support: the plugin declares minSdk 24 and every newer Android API it uses has a version check and fallback. Requires PAM Native 1.53.1 or later.
