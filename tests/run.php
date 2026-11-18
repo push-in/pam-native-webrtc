@@ -382,9 +382,19 @@ $test('native modules implement the shared media contract on both platforms', st
     $check(is_file($root.'/android/src/main/kotlin/dev/pam/webrtc/RtcLocalMedia.kt') && is_file($root.'/ios/Sources/RtcLocalMedia.swift'), 'native stream classes');
 });
 
-$test('plugin manifest targets PAM Native 1.0.35 and declares runtime permissions', static function () use ($check): void {
+$test('plugin manifest targets the PAM Native release composer requires and declares runtime permissions', static function () use ($check): void {
     $manifest = json_decode((string) file_get_contents(dirname(__DIR__).'/pam-native.plugin.json'), true, flags: JSON_THROW_ON_ERROR);
-    $check($manifest['pamNative'] === ['minimum' => '1.0.35', 'maximumExclusive' => '2.0.0'], 'range');
+    $check((static function (array $range): bool {
+        // The range follows composer.json's PAM Native requirement (^X.Y.Z):
+        // a core bump updates both files and never this test.
+        $composer = json_decode((string) file_get_contents(dirname(__DIR__).'/composer.json'), true, flags: JSON_THROW_ON_ERROR);
+        $required = ltrim((string) $composer['require']['pushinbr/pam-native'], '^');
+        $minimum = (string) ($range['minimum'] ?? '');
+        return preg_match('/^\d+\.\d+\.\d+$/', $minimum) === 1
+            && version_compare($minimum, '1.0.35', '>=')
+            && version_compare(preg_match('/^\d+\.\d+$/', $required) ? $required.'.0' : $required, $minimum, '==')
+            && ($range['maximumExclusive'] ?? null) === '2.0.0';
+    })($manifest['pamNative']), 'range');
     foreach (['CAMERA', 'RECORD_AUDIO', 'MODIFY_AUDIO_SETTINGS', 'ACCESS_NETWORK_STATE'] as $permission) {
         $check(in_array("android.permission.{$permission}", $manifest['android']['permissions'], true), $permission);
     }
