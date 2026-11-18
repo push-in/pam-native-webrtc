@@ -402,6 +402,31 @@ class WebRtcInstrumentedTest {
         assertFalse(call(audioModule, "unknown", emptyMap()).ok)
     }
 
+    @Test
+    fun anIncomingCallRingsOutsideCommunicationModeAndAnswersIntoIt() {
+        val audio = context.getSystemService(AudioManager::class.java)
+        val before = audio.mode
+        val session = CallAudioSession.get(context)
+        // ringIncoming: a voice session, then the ringtone.
+        assertTrue(call(audioModule, "start", mapOf("mode" to WireValue.Integer(1))).ok)
+        assertTrue(call(audioModule, "setProximity", mapOf("enabled" to WireValue.Flag(false))).ok)
+        assertTrue(call(audioModule, "setRingtone", mapOf("enabled" to WireValue.Flag(true))).ok)
+        assertTrue(session.isRinging())
+        assertEquals(before, audio.mode)
+        assertFalse(session.isProximityHeld())
+        // Starting the session again while it rings (a re-render) keeps ringing.
+        assertTrue(call(audioModule, "start", mapOf("mode" to WireValue.Integer(1))).ok)
+        assertTrue(session.isRinging())
+        assertEquals(before, audio.mode)
+        // Answer: the ringtone stops and the call audio takes over.
+        assertTrue(call(audioModule, "setRingtone", mapOf("enabled" to WireValue.Flag(false))).ok)
+        assertFalse(session.isRinging())
+        assertFalse(session.isRingtonePlaying())
+        assertEquals(AudioManager.MODE_IN_COMMUNICATION, audio.mode)
+        assertTrue(call(audioModule, "stop", emptyMap()).ok)
+        assertEquals(before, audio.mode)
+    }
+
     private fun <T> onMain(block: () -> T): T {
         val result = AtomicReference<T>()
         val latch = CountDownLatch(1)

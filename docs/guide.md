@@ -188,7 +188,12 @@ TURN servers are converted with `IceServer::stun(...$urls)` /
 `IceServer::turn($urls, $username, $credential)` in chunks of eight URLs, and
 malformed entries are skipped (`InvalidArgumentException`). The incoming side
 plays `CallAudio::start(...)->proximity(false)->ringtone()` while the call
-screen waits for an answer. A runnable minimal app is in [`example/`](example).
+screen waits for an answer, and calls `ringtone(false)` on answer. While the
+ringtone plays the session stays out of communication mode: it rings like the
+system ringer (loudspeaker, ring volume; Android keeps the previous audio mode
+and no communication device, iOS overrides the output to the speaker) instead
+of the earpiece at in-call volume. `ringtone(false)` enters communication mode
+with the call route; `start()` again while ringing keeps ringing. A runnable minimal app is in [`example/`](example).
 
 ## API reference
 
@@ -243,7 +248,7 @@ All classes live in `Pam\Native\WebRtc`.
 | `start(CallAudioMode $mode = Voice): self` | Starts a session; replaces the active one. |
 | `active(): ?self`, `stopActive(): void` | Current session. |
 | `speaker(bool $enabled = true)`, `bluetooth(bool $prefer = true)` | Routing preferences. |
-| `ringback(bool $play = true)`, `ringtone(bool $play = true)` | Tones (ringtone vibrates when allowed). |
+| `ringback(bool $play = true)`, `ringtone(bool $play = true)` | Tones (ringtone vibrates when allowed and rings on the loudspeaker outside communication mode until `ringtone(false)`). |
 | `proximity(bool $enabled = true)` | Screen off at the ear while the earpiece is active. |
 | `mute(bool $muted = true)` | Device-wide microphone mute; prefer `PeerConnection::enableMicrophone()`. |
 | `onRouteChange(Closure(CallAudioRoute))`, `route(): ?CallAudioRoute`, `isActive(): bool` | Route events. |

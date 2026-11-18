@@ -60,6 +60,8 @@ final class CallAudioSession: @unchecked Sendable {
     private var routeObserver: NSObjectProtocol?
     private var ringback: RingbackTone?
     private var ringtoneTimer: Timer?
+    /// The in-app ringtone owns the output: loudspeaker, no proximity, until it stops (mirrors Android).
+    private(set) var ringing = false
 
     func start(mode requested: Int64) throws {
         lock.lock()
@@ -84,6 +86,7 @@ final class CallAudioSession: @unchecked Sendable {
         defer { lock.unlock() }
         guard active else { return }
         active = false
+        ringing = false
         setRingback(false)
         setRingtone(false)
         updateProximity(0)
@@ -138,7 +141,14 @@ final class CallAudioSession: @unchecked Sendable {
 
     /// iOS exposes no system ringtone to apps: plays the alert sound with
     /// vibration every 2 s until stopped (CallKit owns the real ringtone).
+    /// An active voice session rings on the loudspeaker, not the receiver,
+    /// and takes its call route back when the ringtone stops (answer).
     func setRingtone(_ enabled: Bool) {
+        lock.lock()
+        let changed = active && ringing != enabled
+        ringing = active && enabled
+        if changed { try? applyRoute() }
+        lock.unlock()
         DispatchQueue.main.async {
             self.ringtoneTimer?.invalidate()
             self.ringtoneTimer = nil
@@ -201,6 +211,7 @@ final class CallAudioSession: @unchecked Sendable {
             try session.setPreferredInput(inputs.first { $0.portType == .builtInMic })
             try session.overrideOutputAudioPort(speakerRequested ? .speaker : .none)
         }
+        if ringing { try session.overrideOutputAudioPort(.speaker) }
         let route = currentRoute()
         updateProximity(route)
         report(route)
@@ -214,7 +225,7 @@ final class CallAudioSession: @unchecked Sendable {
     }
 
     private func updateProximity(_ route: Int64) {
-        let wanted = active && proximityEnabled && mode == Self.modeVoice && route == Self.routeEarpiece
+        let wanted = active && !ringing && proximityEnabled && mode == Self.modeVoice && route == Self.routeEarpiece
         DispatchQueue.main.async { UIDevice.current.isProximityMonitoringEnabled = wanted }
     }
 }

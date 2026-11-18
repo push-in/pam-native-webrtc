@@ -27,6 +27,11 @@ import java.util.concurrent.Executor
  *
  * Routing priority: preferred Bluetooth headset, wired headset (unless the
  * speaker was explicitly requested), speaker when requested, earpiece.
+ *
+ * While the in-app ringtone plays, the session leaves communication mode:
+ * in MODE_IN_COMMUNICATION the ringtone followed the call route (earpiece)
+ * with in-call attenuation. It rings like the system ringer (speaker, ring
+ * volume) and enters communication mode when the ringtone stops (answer).
  */
 class CallAudioSession private constructor(context: Context) {
     private val context = context.applicationContext
@@ -52,6 +57,8 @@ class CallAudioSession private constructor(context: Context) {
     private var lastRoute = 0
     private var scoStarted = false
     private var communicationListener: Any? = null
+    /** The ringtone owns the output: no communication mode or device until it stops. */
+    private var ringing = false
 
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) = reroute()
@@ -73,8 +80,26 @@ class CallAudioSession private constructor(context: Context) {
         this.mode = if (mode == MODE_VIDEO) MODE_VIDEO else MODE_VOICE
         speakerRequested = this.mode == MODE_VIDEO
         active = true
+        if (ringing) return
+        enterCommunication()
+    }
+
+    private fun enterCommunication() {
         audio.mode = AudioManager.MODE_IN_COMMUNICATION
         applyRoute()
+    }
+
+    /** Ringing: the platform default output and mode, as for the system ringer. */
+    private fun leaveCommunication() {
+        releaseProximity()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            audio.clearCommunicationDevice()
+        } else {
+            @Suppress("DEPRECATION")
+            audio.isSpeakerphoneOn = false
+            stopSco()
+        }
+        audio.mode = previousMode
     }
 
     @Synchronized
@@ -83,6 +108,7 @@ class CallAudioSession private constructor(context: Context) {
         active = false
         stopRingback()
         stopRingtone()
+        ringing = false
         releaseProximity()
         audio.unregisterAudioDeviceCallback(deviceCallback)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -105,19 +131,19 @@ class CallAudioSession private constructor(context: Context) {
     @Synchronized
     fun setSpeaker(enabled: Boolean) {
         speakerRequested = enabled
-        if (active) applyRoute()
+        if (active && !ringing) applyRoute()
     }
 
     @Synchronized
     fun setBluetooth(enabled: Boolean) {
         preferBluetooth = enabled
-        if (active) applyRoute()
+        if (active && !ringing) applyRoute()
     }
 
     @Synchronized
     fun setProximity(enabled: Boolean) {
         proximityEnabled = enabled
-        updateProximity(currentRoute())
+        if (!ringing) updateProximity(currentRoute())
     }
 
     fun setMicrophoneMute(muted: Boolean) {
@@ -137,8 +163,19 @@ class CallAudioSession private constructor(context: Context) {
 
     @Synchronized
     fun setRingtone(enabled: Boolean) {
-        if (!enabled) return stopRingtone()
+        if (!enabled) {
+            stopRingtone()
+            if (ringing) {
+                ringing = false
+                if (active) enterCommunication()
+            }
+            return
+        }
         if (ringtone != null) return
+        if (active && !ringing) {
+            ringing = true
+            leaveCommunication()
+        }
         val uri = RingtoneManager.getActualDefaultRingtoneUri(context, RingtoneManager.TYPE_RINGTONE)
             ?: Settings.System.DEFAULT_RINGTONE_URI
         ringtone = RingtoneManager.getRingtone(context, uri)?.apply {
@@ -157,6 +194,9 @@ class CallAudioSession private constructor(context: Context) {
     fun isRingtonePlaying(): Boolean = ringtone?.isPlaying == true
 
     fun isProximityHeld(): Boolean = proximityLock?.isHeld == true
+
+    /** True while the in-app ringtone keeps the session out of communication mode. */
+    fun isRinging(): Boolean = ringing
 
     /** Current output route as one of the ROUTE_* constants (0 when inactive). */
     fun currentRoute(): Int {
@@ -183,7 +223,7 @@ class CallAudioSession private constructor(context: Context) {
     }
 
     private fun reroute() {
-        synchronized(this) { if (active) applyRoute() }
+        synchronized(this) { if (active && !ringing) applyRoute() }
     }
 
     private fun desiredRoute(available: Set<Int>): Int = when {
@@ -280,7 +320,7 @@ class CallAudioSession private constructor(context: Context) {
 
     @SuppressLint("WakelockTimeout")
     private fun updateProximity(route: Int) {
-        val wanted = active && proximityEnabled && mode == MODE_VOICE && route == ROUTE_EARPIECE
+        val wanted = active && !ringing && proximityEnabled && mode == MODE_VOICE && route == ROUTE_EARPIECE
         if (!wanted) return releaseProximity()
         if (proximityLock?.isHeld == true) return
         if (!power.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) return

@@ -310,7 +310,11 @@ final class WebRtcTests: XCTestCase {
         XCTAssertTrue(call(audioModule, "setRingback", ["enabled": .flag(false)]).ok)
         XCTAssertFalse(session.isRingbackPlaying)
         XCTAssertTrue(call(audioModule, "setRingtone", ["enabled": .flag(true)]).ok)
+        // An incoming call rings on the loudspeaker, not the receiver.
+        XCTAssertTrue(session.ringing)
+        XCTAssertEqual(session.currentRoute(), CallAudioSession.routeSpeaker)
         XCTAssertTrue(call(audioModule, "setRingtone", ["enabled": .flag(false)]).ok)
+        XCTAssertFalse(session.ringing)
         waitUntil(2) { !session.isRingtonePlaying }
         XCTAssertTrue(call(audioModule, "setMicrophoneMute", ["muted": .flag(true)]).ok)
         XCTAssertTrue(call(audioModule, "stop", [:]).ok)
