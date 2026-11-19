@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4 - 2026-11-18
+
+- Fixed: an incoming call rings like the system ringer (speaker, ring volume) and enters communication mode when the ringtone stops.
+
 ## 0.3.3 - 2026-11-18
 
 - Tests: the PAM Native range check follows the requirement in composer.json
